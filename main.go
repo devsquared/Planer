@@ -6,54 +6,109 @@ import (
 	"io"
 	"math"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
 func main() {
-	// TODO: clean up main entry point
+	// TODO: typing a timestamp in a cli seems awkward, should give a yaml config to ease this; then look at a wails app
 	// TODO: create multiple methods to allow for word search in log
-	// TODO: define arg setup to properly route to methods
+	// TODO: provide a file structure to drop in log files and get output files for saving
 	// TODO: provide way to define the time format
 	// TODO: look at merging with the file search project
+	if err := cli(); err != nil {
+		fmt.Fprintf(os.Stderr, "%s\n", err)
+		os.Exit(1)
+	}
+}
 
-	s := time.Now()
-	args := os.Args[1:]
-	if len(args) != 6 {
-		fmt.Println("Expected a from time, a to time, and a file name")
-		return
+func cli() error {
+	// setup a ctrl-c interrupt to cancel and exit the program
+	cancelled := setupCloseHandler()
+
+	fmt.Println("Welcome to Planer, the easy way to make your logs manageable.")
+	fmt.Println("-------------------------------------------------------------")
+
+	// TODO: when we implement term filtering, we will ask if the user wants this
+	// and what the term is
+
+	// prompt a user for the args we need
+	fmt.Println("To filter down the log, what is the 'from' portion of the time range?")
+	fmt.Println("(Format the timestamp as such - 2006-01-02T15:04:05.0000Z")
+
+	fromString, err := getInputText()
+	if err != nil {
+		fmt.Println("Issue getting from timestamp input text.")
+		return err
 	}
 
-	startTimeArg := args[1]
-	finishTimeArg := args[3]
-	fileName := args[5]
+	from, err := time.Parse("2006-01-02T15:04:05.0000Z", fromString)
+	if err != nil {
+		fmt.Println("Unable to parse the from time arg : ", fromString)
+		return err
+	}
+
+	fmt.Println("What is the 'to' portion of the time range? Alternatively, leave arg blank to default to now.")
+	fmt.Println("(Format the timestamp as such - 2006-01-02T15:04:05.0000Z")
+
+	toString, err := getInputText()
+	if err != nil {
+		fmt.Println("Issue getting the to timestamp input text.")
+		return err
+	}
+
+	var to time.Time
+	if toString == "" {
+		to = time.Now()
+	} else {
+		to, err = time.Parse("2006-01-02T15:04:05.0000Z", toString)
+		if err != nil {
+			fmt.Println("Unable to parse the to time arg : ", toString)
+			return err
+		}
+	}
+
+	fmt.Println("What is the log file to plane down?")
+	fmt.Println("Please provide a full path.")
+
+	fileName, err := getInputText()
+	if err != nil {
+		fmt.Println("Issue getting the fileName input text.")
+		return err
+	}
+
+	if !cancelled {
+		message, err := planeLog(from, to, fileName)
+		if err != nil {
+			return err
+		}
+
+		fmt.Println(message)
+	}
+
+	return nil
+}
+
+func planeLog(from time.Time, to time.Time, fileName string) (string, error) {
+	var message string
+
+	s := time.Now()
 
 	file, err := os.Open(fileName)
-
 	if err != nil {
-		fmt.Println("Unable to open file : ", err)
-		return
+		message = "Unable to open file : " + fileName
+		return message, err
 	}
 
 	defer file.Close()
 
-	queryStartTime, err := time.Parse("2006-01-02T15:04:05.0000Z", startTimeArg)
-	if err != nil {
-		fmt.Println("Unable to parse the start time arg : ", startTimeArg)
-		return
-	}
-
-	queryFinishTime, err := time.Parse("2006-01-02T15:04:05.0000Z", finishTimeArg)
-	if err != nil {
-		fmt.Println("Unable to parse the end time arg : ", finishTimeArg)
-		return
-	}
-
 	filestat, err := file.Stat()
 	if err != nil {
-		fmt.Println("Could not get the file stat")
-		return
+		message = "Could not get the file stat"
+		return message, err
 	}
 
 	fileSize := filestat.Size()
@@ -64,7 +119,7 @@ func main() {
 		b := make([]byte, 1)
 		n, err := file.ReadAt(b, offset)
 		if err != nil {
-			fmt.Println("Error reading file : ", err)
+			fmt.Println("Error reading file : ", err) // should output a line here
 			break
 		}
 
@@ -80,8 +135,8 @@ func main() {
 	lastLine := make([]byte, lastLineSize)
 	_, err = file.ReadAt(lastLine, offset+1)
 	if err != nil {
-		fmt.Println("Could not read last line with offset, ", offset, " and lastLineSize, ", lastLineSize)
-		return
+		message = "Could not read last line with offset, " + string(offset) + " and lastLineSize, " + string(lastLineSize)
+		return message, err
 	}
 
 	logSlice := strings.SplitN(string(lastLine), ",", 2)
@@ -89,14 +144,47 @@ func main() {
 
 	lastLogCreationTime, err := time.Parse("2006-01-02T15:04:05.0000Z", logCreationTimeString)
 	if err != nil {
-		fmt.Println("Unable to parse time : ", err)
+		message = "Unable to parse time : " + logCreationTimeString
+		return message, err
 	}
 
-	if lastLogCreationTime.After(queryStartTime) && lastLogCreationTime.Before(queryFinishTime) {
-		Process(file, queryStartTime, queryFinishTime)
+	if lastLogCreationTime.After(from) && lastLogCreationTime.Before(to) {
+		Process(file, from, to)
 	}
 
-	fmt.Println("\nTime taken - ", time.Since(s))
+	message = "Time taken - " + string(time.Since(s))
+	return message, nil
+}
+
+func getInputText() (string, error) {
+	// prompt for input
+	fmt.Print(">> ")
+
+	reader := bufio.NewReader(os.Stdin)
+	text, err := reader.ReadString('\n')
+	if err != nil {
+		return "", err
+	}
+
+	text = strings.TrimSuffix(text, "\n")
+
+	return text, nil
+}
+
+// NOTE: This close handler does not seem to work in situations where a IDE handles the running of the app
+// It, however, works as intended in a terminal.
+func setupCloseHandler() bool {
+	c := make(chan os.Signal, 2)
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	go func() bool {
+		<-c
+		fmt.Println("\r- Ctrl+C pressed in Terminal")
+		os.Exit(0)
+		return true
+	}()
+
+	//base case
+	return false
 }
 
 func Process(f *os.File, start time.Time, end time.Time) error {
@@ -185,7 +273,7 @@ func ProcessChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, sta
 
 				logCreationTime, err := time.Parse("2006-01-02T15:04:05.0000Z", logCreationTimeString)
 				if err != nil {
-					fmt.Printf("\n Unable to parse time :%s for the log :v", logCreationTimeString, text)
+					fmt.Println("Unable to parse time : " + logCreationTimeString + " for the log : " + text)
 					return
 				}
 
