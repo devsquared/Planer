@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+//TODO: need to go through and test. Wrote this patch set in a quick idea period.
+
 // PlaneLog is the main entry point for the planer app
 func PlaneLog(from time.Time, to time.Time, fileName string) (string, error) {
 	var message string
@@ -69,14 +71,14 @@ func PlaneLog(from time.Time, to time.Time, fileName string) (string, error) {
 	}
 
 	if lastLogCreationTime.After(from) && lastLogCreationTime.Before(to) {
-		Process(file, from, to)
+		process(file, from, to)
 	}
 
 	message = "Time taken - " + string(time.Since(s))
 	return message, nil
 }
 
-func Process(f *os.File, start time.Time, end time.Time) error {
+func process(f *os.File, start time.Time, end time.Time) ([]string, error) {
 	linesPool := sync.Pool{New: func() interface{} {
 		lines := make([]byte, 250*1024)
 		return lines
@@ -106,7 +108,7 @@ func Process(f *os.File, start time.Time, end time.Time) error {
 				break
 			}
 
-			return err
+			return nil, err
 		}
 
 		nextUntilNewline, err := r.ReadBytes('\n')
@@ -115,18 +117,19 @@ func Process(f *os.File, start time.Time, end time.Time) error {
 			buf = append(buf, nextUntilNewline...)
 		}
 
+		var strings []string
 		waitGroup.Add(1)
 		go func() {
-			ProcessChunk(buf, &linesPool, &stringPool, start, end)
+			strings.append(strings, processChunk(buf, &linesPool, &stringPool, start, end))
 			waitGroup.Done()
 		}()
 	}
 
 	waitGroup.Wait()
-	return nil
+	return strings, nil
 }
 
-func ProcessChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, start time.Time, end time.Time) {
+func processChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, start time.Time, end time.Time) []string {
 
 	var waitGroup2 sync.WaitGroup
 
@@ -147,32 +150,44 @@ func ProcessChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, sta
 		numOfThreads++
 	}
 
+	var allFilteredStrings []string
 	for i := 0; i < (numOfThreads); i++ {
 		waitGroup2.Add(1)
-		go func(s int, e int) {
-			defer waitGroup2.Done()
-			for i := s; i < e; i++ {
-				text := logsSlice[i]
-				if len(text) == 0 {
-					continue
-				}
-
-				logSlice := strings.SplitN(text, ",", 2)
-				logCreationTimeString := logSlice[0]
-
-				logCreationTime, err := time.Parse("2006-01-02T15:04:05.0000Z", logCreationTimeString)
-				if err != nil {
-					fmt.Println("Unable to parse time : " + logCreationTimeString + " for the log : " + text)
-					return
-				}
-
-				if logCreationTime.After(start) && logCreationTime.Before(end) {
-					fmt.Println(text)
-				}
-			}
-		}(i*chunkSize, int(math.Min(float64((i+1)*chunkSize), float64(len(logsSlice)))))
+		strings := make(string chan)
+		go conProcessChunks(i*chunkSize, int(math.Min(float64((i+1)*chunkSize), float64(len(logsSlice)))), strings)
+		allFilteredStrings.append(allFilteredStrings, <-strings)
 	}
 
 	waitGroup2.Wait()
 	logsSlice = nil
 }
+
+func conProcessChunks(s int, e int, channel chan string) {
+	defer waitGroup2.Done()
+	var stringBuilder strings.Builder
+	for i := s; i < e; i++ {
+		text := logsSlice[i]
+		if len(text) == 0 {
+			continue
+		}
+
+		logSlice := strings.SplitN(text, ",", 2)
+		logCreationTimeString := logSlice[0]
+
+		logCreationTime, err := time.Parse("2006-01-02T15:04:05.0000Z", logCreationTimeString)
+		if err != nil {
+			fmt.Println("Unable to parse time : " + logCreationTimeString + " for the log : " + text)
+			return
+		}
+
+		if logCreationTime.After(start) && logCreationTime.Before(end) {
+			// TODO: refactor in order to output a built string of all filtered lines
+			stringBuilder.WriteString(text)
+		}
+	}
+
+	channel <- stringBuilder.String()
+}
+
+// TODO: offer a file output of this info
+// TODO: create a word finder that will take the filtered stuff and find the word(s) given
