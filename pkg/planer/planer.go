@@ -14,7 +14,7 @@ import (
 //TODO: need to go through and test. Wrote this patch set in a quick idea period.
 
 // PlaneLog is the main entry point for the planer app
-func PlaneLog(from time.Time, to time.Time, fileName string) (string, error) {
+func PlaneLog(from time.Time, to time.Time, searchedWord string, fileName string) (string, error) {
 	var message string
 
 	s := time.Now()
@@ -71,14 +71,14 @@ func PlaneLog(from time.Time, to time.Time, fileName string) (string, error) {
 	}
 
 	if lastLogCreationTime.After(from) && lastLogCreationTime.Before(to) {
-		process(file, from, to)
+		process(file, from, to, searchedWord)
 	}
 
 	message = "Time taken - " + string(time.Since(s))
 	return message, nil
 }
 
-func process(f *os.File, start time.Time, end time.Time) ([]string, error) {
+func process(f *os.File, start time.Time, end time.Time, word string) ([]string, error) {
 	linesPool := sync.Pool{New: func() interface{} {
 		lines := make([]byte, 250*1024)
 		return lines
@@ -93,6 +93,7 @@ func process(f *os.File, start time.Time, end time.Time) ([]string, error) {
 
 	var waitGroup sync.WaitGroup
 
+	var allStrings []string
 	for {
 		buf := linesPool.Get().([]byte)
 
@@ -117,19 +118,18 @@ func process(f *os.File, start time.Time, end time.Time) ([]string, error) {
 			buf = append(buf, nextUntilNewline...)
 		}
 
-		var strings []string
 		waitGroup.Add(1)
 		go func() {
-			strings.append(strings, processChunk(buf, &linesPool, &stringPool, start, end))
+			allStrings = append(allStrings, processChunk(buf, &linesPool, &stringPool, start, end, word)...)
 			waitGroup.Done()
 		}()
 	}
 
 	waitGroup.Wait()
-	return strings, nil
+	return allStrings, nil
 }
 
-func processChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, start time.Time, end time.Time) []string {
+func processChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, start time.Time, end time.Time, word string) []string {
 
 	var waitGroup2 sync.WaitGroup
 
@@ -153,17 +153,21 @@ func processChunk(chunk []byte, linesPool *sync.Pool, stringPool *sync.Pool, sta
 	var allFilteredStrings []string
 	for i := 0; i < (numOfThreads); i++ {
 		waitGroup2.Add(1)
-		strings := make(string chan)
-		go conProcessChunks(i*chunkSize, int(math.Min(float64((i+1)*chunkSize), float64(len(logsSlice)))), strings)
-		allFilteredStrings.append(allFilteredStrings, <-strings)
+		strings := make(chan string)
+		go conProcessChunks(&waitGroup2, logsSlice, word, i*chunkSize, int(math.Min(float64((i+1)*chunkSize), float64(len(logsSlice)))), strings, start, end)
+		allFilteredStrings = append(allFilteredStrings, <-strings)
 	}
 
 	waitGroup2.Wait()
 	logsSlice = nil
+
+	return allFilteredStrings
 }
 
-func conProcessChunks(s int, e int, channel chan string) {
-	defer waitGroup2.Done()
+func conProcessChunks(waitGroup *sync.WaitGroup, logsSlice []string, word string, s int, e int, channel chan string, start time.Time, end time.Time) {
+	// here we concurrently process the chunks and pass back
+	// the chunk that fits the criteria back through the given channel
+	defer waitGroup.Done()
 	var stringBuilder strings.Builder
 	for i := s; i < e; i++ {
 		text := logsSlice[i]
@@ -180,7 +184,7 @@ func conProcessChunks(s int, e int, channel chan string) {
 			return
 		}
 
-		if logCreationTime.After(start) && logCreationTime.Before(end) {
+		if logCreationTime.After(start) && logCreationTime.Before(end) && strings.Contains(text, word) {
 			// TODO: refactor in order to output a built string of all filtered lines
 			stringBuilder.WriteString(text)
 		}
@@ -188,6 +192,3 @@ func conProcessChunks(s int, e int, channel chan string) {
 
 	channel <- stringBuilder.String()
 }
-
-// TODO: offer a file output of this info
-// TODO: create a word finder that will take the filtered stuff and find the word(s) given
