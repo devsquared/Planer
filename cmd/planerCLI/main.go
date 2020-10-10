@@ -79,8 +79,17 @@ func cli() error {
 		return err
 	}
 
+	fmt.Println("What is the word to filter by?")
+	fmt.Println("(If you have no filter word, leave this blank.)")
+
+	filterWord, err := getInputText()
+	if err != nil {
+		fmt.Println("Issue getting the filter word.")
+		return err
+	}
+
 	if !cancelled {
-		message, err := planer.PlaneLog(from, to, fileName)
+		message, err := planer.PlaneLog(from, to, filterWord, fileName)
 		if err != nil {
 			return err
 		}
