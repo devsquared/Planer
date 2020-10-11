@@ -11,8 +11,6 @@ import (
 	"time"
 )
 
-//TODO: need to go through and test. Wrote this patch set in a quick idea period.
-
 // PlaneLog is the main entry point for the planer app
 func PlaneLog(from time.Time, to time.Time, searchedWord string, fileName string) (string, error) {
 	var message string
